@@ -44,6 +44,7 @@ export interface RequirementDocument {
   raw: string
   summary: BTSummary | null
   fileName?: string
+  fileUrl?: string  // URL документа на media.progressusbot.ru
 }
 
 export interface Requirements {

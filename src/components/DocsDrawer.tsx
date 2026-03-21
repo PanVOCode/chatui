@@ -1,8 +1,12 @@
 import { useCallback, useRef, useState } from 'react'
 import type { RequirementDocument } from '../types'
 import Drawer from './Drawer'
+import { convertDocument, uploadImage } from '../lib/publishApi'
 
-const FILE_INPUT_ACCEPT = '.txt,.md,.markdown,.json,.csv,.html,.htm,text/plain'
+// Форматы для текстовых документов
+const DOC_ACCEPT = '.txt,.md,.markdown,.json,.csv,.html,.htm,.pdf,.docx,.odt,.rtf,.epub'
+// Форматы для изображений
+const IMG_ACCEPT = '.jpg,.jpeg,.png,.gif,.webp,.svg,.bmp,.tiff'
 
 type DocSlot = 'business' | 'guideline'
 
@@ -36,6 +40,8 @@ export default function DocsDrawer({ open, business, guideline, onClose, onSlotC
           onCommit={(doc) => onSlotChange('guideline', doc)}
           onClear={() => onSlotChange('guideline', { raw: '', summary: null })}
         />
+        <div style={{ height: 1, background: 'var(--color-border)' }} />
+        <ImageUploadSection />
       </div>
     </Drawer>
   )
@@ -47,24 +53,39 @@ function SlotSection({ label, doc, placeholder, onCommit, onClear }: {
 }) {
   const [mode, setMode] = useState<null | 'files' | 'text'>(null)
   const [draft, setDraft] = useState('')
-  const [stagedFiles, setStagedFiles] = useState<{ name: string; text: string }[]>([])
+  const [stagedFiles, setStagedFiles] = useState<File[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const dragDepth = useRef(0)
   const [dropActive, setDropActive] = useState(false)
 
-  const readFiles = useCallback((list: FileList | null) => {
+  const stageFiles = useCallback((list: FileList | null) => {
     if (!list) return
-    Array.from(list).forEach((f) => {
-      const reader = new FileReader()
-      reader.onload = () => {
-        const text = reader.result as string
-        setStagedFiles((p) => [...p, { name: f.name, text }])
-      }
-      reader.readAsText(f)
-    })
+    setStagedFiles((p) => [...p, ...Array.from(list)])
   }, [])
 
   const isLoaded = Boolean(doc.raw)
+
+  const handleSaveFiles = useCallback(async () => {
+    if (stagedFiles.length === 0) return
+    setLoading(true)
+    setError(null)
+    try {
+      const results = await Promise.all(stagedFiles.map((f) => convertDocument(f)))
+      const merged = results.map((r) => r.text).join('\n\n')
+      const name = stagedFiles.length === 1 ? stagedFiles[0]!.name : `${stagedFiles.length} файлов`
+      // Ссылки на конвертированные документы на media.progressusbot.ru
+      const fileUrl = results.map((r) => r.url).join(', ')
+      onCommit({ raw: merged, summary: null, fileName: name, fileUrl })
+      setStagedFiles([])
+      setMode(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка загрузки')
+    } finally {
+      setLoading(false)
+    }
+  }, [stagedFiles, onCommit])
 
   if (isLoaded && mode === null) {
     return (
@@ -77,6 +98,13 @@ function SlotSection({ label, doc, placeholder, onCommit, onClear }: {
           <div className="px-3 py-2.5 text-[11px] leading-relaxed" style={{ color: 'var(--color-muted-hi)' }}>
             {doc.raw.slice(0, 200)}{doc.raw.length > 200 ? '…' : ''}
           </div>
+          {doc.fileUrl && (
+            <div className="px-3 pb-2 text-[10px]" style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>
+              🔗 <a href={doc.fileUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--color-accent)' }}>
+                {doc.fileUrl.length > 55 ? doc.fileUrl.slice(0, 55) + '…' : doc.fileUrl}
+              </a>
+            </div>
+          )}
         </div>
         <button
           type="button" onClick={onClear}
@@ -92,7 +120,7 @@ function SlotSection({ label, doc, placeholder, onCommit, onClear }: {
       <section>
         <SectionTitle>{label}</SectionTitle>
         <div className="flex flex-col gap-2 mt-2">
-          <SlotBtn icon="📁" text="Загрузить файл" onClick={() => setMode('files')} />
+          <SlotBtn icon="📁" text="Загрузить файл (PDF, DOCX, TXT…)" onClick={() => setMode('files')} />
           <SlotBtn icon="📝" text="Вставить текст" onClick={() => setMode('text')} />
         </div>
       </section>
@@ -129,7 +157,8 @@ function SlotSection({ label, doc, placeholder, onCommit, onClear }: {
   return (
     <section>
       <SectionTitle>{label}</SectionTitle>
-      <input ref={fileRef} type="file" multiple accept={FILE_INPUT_ACCEPT} className="sr-only" onChange={(e) => readFiles(e.target.files)} />
+      <input ref={fileRef} type="file" multiple accept={DOC_ACCEPT} className="sr-only"
+        onChange={(e) => stageFiles(e.target.files)} />
       <div
         role="button" tabIndex={0}
         onClick={() => fileRef.current?.click()}
@@ -137,7 +166,7 @@ function SlotSection({ label, doc, placeholder, onCommit, onClear }: {
         onDragEnter={(e) => { e.preventDefault(); dragDepth.current++; setDropActive(true) }}
         onDragLeave={(e) => { e.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (dragDepth.current === 0) setDropActive(false) }}
         onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }}
-        onDrop={(e) => { e.preventDefault(); dragDepth.current = 0; setDropActive(false); readFiles(e.dataTransfer.files) }}
+        onDrop={(e) => { e.preventDefault(); dragDepth.current = 0; setDropActive(false); stageFiles(e.dataTransfer.files) }}
         className="interactive mt-2 rounded-xl px-4 py-6 text-center cursor-pointer"
         style={{
           background: dropActive ? 'var(--color-accent-lo)' : 'transparent',
@@ -146,7 +175,9 @@ function SlotSection({ label, doc, placeholder, onCommit, onClear }: {
       >
         <div className="text-[22px] mb-2">📁</div>
         <div className="text-[12px] font-medium" style={{ color: 'var(--color-muted-hi)' }}>Перетащите файлы сюда</div>
-        <div className="text-[10px] mt-1" style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>TXT, MD, JSON, HTML — или нажмите</div>
+        <div className="text-[10px] mt-1" style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>
+          PDF, DOCX, TXT, MD, HTML — или нажмите
+        </div>
       </div>
 
       {stagedFiles.length > 0 && (
@@ -162,22 +193,87 @@ function SlotSection({ label, doc, placeholder, onCommit, onClear }: {
         </ul>
       )}
 
+      {error && (
+        <div className="mt-2 text-[11px] px-3 py-2 rounded-lg" style={{ background: 'rgba(239,68,68,.1)', color: '#ef4444' }}>
+          {error}
+        </div>
+      )}
+
       <div className="flex gap-2 mt-2">
         <button
-          type="button" disabled={stagedFiles.length === 0}
-          onClick={() => {
-            const merged = stagedFiles.map((f) => f.text).join('\n\n')
-            const name = stagedFiles.length === 1 ? stagedFiles[0]!.name : `${stagedFiles.length} файлов`
-            onCommit({ raw: merged, summary: null, fileName: name })
-            setStagedFiles([]); setMode(null)
-          }}
+          type="button" disabled={stagedFiles.length === 0 || loading}
+          onClick={handleSaveFiles}
           className="btn-gradient flex-1 text-[12px] font-semibold text-white py-1.5 rounded-lg cursor-pointer"
-        >Сохранить</button>
-        <button type="button" onClick={() => { setMode(null); setStagedFiles([]) }}
+        >
+          {loading ? 'Конвертирую…' : 'Сохранить'}
+        </button>
+        <button type="button" onClick={() => { setMode(null); setStagedFiles([]); setError(null) }}
           className="interactive px-3 py-1.5 rounded-lg text-[12px] cursor-pointer"
           style={{ background: 'transparent', border: '1px solid var(--color-border)', color: 'var(--color-muted-hi)' }}
         >✕</button>
       </div>
+    </section>
+  )
+}
+
+function ImageUploadSection() {
+  const [uploading, setUploading] = useState(false)
+  const [result, setResult] = useState<{ url: string; name: string } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const handleFile = useCallback(async (file: File) => {
+    setUploading(true)
+    setError(null)
+    setResult(null)
+    try {
+      const { url } = await uploadImage(file)
+      setResult({ url, name: file.name })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка загрузки')
+    } finally {
+      setUploading(false)
+    }
+  }, [])
+
+  return (
+    <section>
+      <SectionTitle>Изображения</SectionTitle>
+      <input ref={fileRef} type="file" accept={IMG_ACCEPT} className="sr-only"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f) }} />
+
+      <button
+        type="button" onClick={() => fileRef.current?.click()} disabled={uploading}
+        className="interactive flex items-center gap-2.5 w-full px-3 py-2.5 rounded-xl text-[12px] font-medium cursor-pointer text-left mt-2"
+        style={{ background: 'var(--color-s1)', border: '1px solid var(--color-border)', color: 'var(--color-muted-hi)' }}
+      >
+        <span>🖼️</span>{uploading ? 'Загружаю…' : 'Загрузить изображение'}
+      </button>
+
+      {error && (
+        <div className="mt-2 text-[11px] px-3 py-2 rounded-lg" style={{ background: 'rgba(239,68,68,.1)', color: '#ef4444' }}>
+          {error}
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-2 rounded-xl overflow-hidden" style={{ border: '1px solid var(--color-border)', background: 'var(--color-s1)' }}>
+          <img src={result.url} alt={result.name} className="w-full object-cover" style={{ maxHeight: 120 }} />
+          <div className="px-3 py-2 flex items-center justify-between gap-2">
+            <span className="text-[10px] truncate" style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>
+              {result.url}
+            </span>
+            <button
+              type="button"
+              onClick={() => navigator.clipboard.writeText(result.url)}
+              className="interactive shrink-0 text-[10px] px-2 py-0.5 rounded cursor-pointer"
+              style={{ border: '1px solid var(--color-border)', background: 'transparent', color: 'var(--color-accent)' }}
+            >
+              Копировать
+            </button>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
