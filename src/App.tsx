@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react'
+import { QUESTIONS, buildLanggraphInput, type QuestionnaireAnswers } from './lib/questionnaire'
 import TopBar from './components/TopBar'
 import IconRail from './components/IconRail'
 import CenterPreview from './components/CenterPreview'
@@ -74,13 +75,18 @@ export default function App() {
   ])
   const [tourOpen, setTourOpen] = useState(false)
   const [messages, setMessages] = useState<Message[]>([
-    { id: makeId(), role: 'agent', text: 'Привет! Загрузите бизнес-требования через панель документов или опишите задачу в чате. Сгенерирую три варианта прототипа.', time: nowTime(), type: 'normal' },
+    { id: makeId(), role: 'agent', text: 'Привет! Я помогу собрать данные для генерации прототипа сайта. Отвечайте на вопросы — в конце получите готовый JSON для агента.<br/><br/>Напишите что угодно, чтобы начать опрос.', time: nowTime(), type: 'normal' },
   ])
 
   const [undoPast, setUndoPast] = useState<ProjectUndoSnapshot[]>([])
   const [undoFuture, setUndoFuture] = useState<ProjectUndoSnapshot[]>([])
   const [siteVersions, setSiteVersions] = useState<SiteVersionEntry[]>([])
   const [activeVersionId, setActiveVersionId] = useState<string | null>(null)
+
+  // Questionnaire state
+  const [qStep, setQStep] = useState<number>(0) // 0 = not started, -1 = done
+  const [qAnswers, setQAnswers] = useState<QuestionnaireAnswers>({})
+  const qStarted = useRef(false)
 
   const snapshotRef = useRef<ProjectUndoSnapshot | null>(null)
   const recordVersionAfterGen = useRef(false)
@@ -263,17 +269,64 @@ export default function App() {
     setActiveVersionId(entryId)
   }, [currentVariant, variants, requirements, messages, tokenCount, agentStep, agentLabel, pushUndoSnapshot])
 
-  /* ── Chat send ── */
+  /* ── Questionnaire send ── */
   const handleChatSend = useCallback((text: string) => {
+    const userMsg: Message = { id: makeId(), role: 'user', text: escHtml(text), type: 'normal', time: nowTime() }
+    setMessages((prev) => [...prev, userMsg])
+
+    // First message — start questionnaire
+    if (!qStarted.current) {
+      qStarted.current = true
+      const q = QUESTIONS[0]!
+      const hint = q.hint ? `<br/><span style="opacity:.6;font-size:11px">${q.hint}</span>` : ''
+      const opt  = q.optional ? ' <span style="opacity:.5;font-size:10px">(необязательно)</span>' : ''
+      setMessages((prev) => [...prev, {
+        id: makeId(), role: 'agent', time: nowTime(), type: 'normal',
+        text: `<strong>Вопрос 1 из ${QUESTIONS.length}${opt}</strong><br/>${q.text}${hint}`,
+      }])
+      setQStep(1)
+      return
+    }
+
+    // Questionnaire in progress
+    if (qStep > 0 && qStep <= QUESTIONS.length) {
+      const currentQ = QUESTIONS[qStep - 1]!
+      const newAnswers: QuestionnaireAnswers = { ...qAnswers, [currentQ.id]: text.trim() }
+      setQAnswers(newAnswers)
+
+      if (qStep === QUESTIONS.length) {
+        // Done — build JSON
+        const result = buildLanggraphInput(newAnswers)
+        setMessages((prev) => [...prev, {
+          id: makeId(), role: 'agent', time: nowTime(), type: 'json-result',
+          text: 'Опрос завершён! Вот JSON для LangGraph-агента:',
+          jsonData: result,
+        }])
+        setQStep(-1)
+        return
+      }
+
+      const nextStep = qStep + 1
+      const q   = QUESTIONS[nextStep - 1]!
+      const hint = q.hint ? `<br/><span style="opacity:.6;font-size:11px">${q.hint}</span>` : ''
+      const opt  = q.optional ? ' <span style="opacity:.5;font-size:10px">(необязательно)</span>' : ''
+      setMessages((prev) => [...prev, {
+        id: makeId(), role: 'agent', time: nowTime(), type: 'normal',
+        text: `<strong>Вопрос ${nextStep} из ${QUESTIONS.length}${opt}</strong><br/>${q.text}${hint}`,
+      }])
+      setQStep(nextStep)
+      return
+    }
+
+    // Questionnaire done — fallback to URL load or generate
     const urlMatch = text.match(/https?:\/\/[^\s]+/)
     if (urlMatch) {
       const clean = urlMatch[0].replace(/[.,;]$/, '')
-      const userMsg: Message = { id: makeId(), role: 'user', text, type: 'normal', time: nowTime() }
       handleLoadUrl(clean, { priorMessages: [...messages, userMsg] })
       return
     }
     handleGenerate(text)
-  }, [handleGenerate, handleLoadUrl, messages])
+  }, [qStep, qAnswers, messages, handleGenerate, handleLoadUrl])
 
   /* ── Requirements change ── */
   const handleSlotDocumentChange = useCallback((slot: 'business' | 'guideline', doc: RequirementDocument) => {

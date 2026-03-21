@@ -3,7 +3,7 @@ export type VariantId = 'A' | 'B' | 'C'
 export type AgentStep = 0 | 1 | 2 | 3 | 4
 export type DrawerKind = 'chat' | 'docs' | 'agent' | null
 
-export type MessageType = 'normal' | 'recommendation' | 'compliance' | 'warning' | 'system-context'
+export type MessageType = 'normal' | 'recommendation' | 'compliance' | 'warning' | 'system-context' | 'json-result'
 
 export interface Message {
   id: string
@@ -14,6 +14,7 @@ export interface Message {
   isThinking?: boolean
   compliance?: ComplianceItem[]
   recommendations?: Recommendation[]
+  jsonData?: unknown
 }
 
 export interface ComplianceItem {

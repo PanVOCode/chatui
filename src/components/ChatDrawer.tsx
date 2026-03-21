@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useState, useCallback } from 'react'
 import type { Message } from '../types'
 import Drawer from './Drawer'
 
@@ -88,6 +88,8 @@ export default function ChatDrawer({ open, messages, onClose, onSend, onFileUplo
 }
 
 function MsgItem({ msg }: { msg: Message }) {
+  if (msg.type === 'json-result') return <JsonResultMsg msg={msg} />
+
   if (msg.type === 'system-context') return (
     <div className="anim-slide-up self-center text-center text-[10px] px-3 py-1.5 rounded-lg max-w-full"
       style={{ background: 'var(--color-accent-lo)', border: '1px solid rgba(99,102,241,.15)', color: 'var(--color-muted-hi)' }}
@@ -144,6 +146,50 @@ function MsgItem({ msg }: { msg: Message }) {
         }
         dangerouslySetInnerHTML={{ __html: msg.text }} />
       {isUser && <span className="text-[9px]" style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>{msg.time}</span>}
+    </div>
+  )
+}
+
+function JsonResultMsg({ msg }: { msg: Message }) {
+  const [copied, setCopied] = useState(false)
+  const json = JSON.stringify(msg.jsonData, null, 2)
+
+  const copy = useCallback(() => {
+    navigator.clipboard.writeText(json)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [json])
+
+  const download = useCallback(() => {
+    const blob = new Blob([json], { type: 'application/json' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = 'langgraph_input.json'
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [json])
+
+  return (
+    <div className="anim-slide-up self-stretch rounded-xl overflow-hidden" style={{ border: '1px solid var(--color-border)', background: 'var(--color-s1)' }}>
+      <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
+        <span className="text-[11px] font-semibold" style={{ color: 'var(--color-ink)' }}>🎉 {msg.text}</span>
+        <span className="text-[9px] ml-auto" style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>{msg.time}</span>
+      </div>
+      <pre className="px-3 py-2.5 text-[10px] overflow-x-auto leading-relaxed" style={{ color: 'var(--color-muted-hi)', fontFamily: 'var(--font-mono)', maxHeight: 320, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+        {json}
+      </pre>
+      <div className="flex gap-2 px-3 pb-3">
+        <button type="button" onClick={copy}
+          className="interactive flex-1 py-1.5 rounded-lg text-[11px] font-semibold cursor-pointer"
+          style={{ border: '1px solid var(--color-border)', background: copied ? 'rgba(16,185,129,.12)' : 'transparent', color: copied ? 'var(--color-ok)' : 'var(--color-muted-hi)' }}>
+          {copied ? '✓ Скопировано' : 'Копировать JSON'}
+        </button>
+        <button type="button" onClick={download}
+          className="btn-gradient interactive px-3 py-1.5 rounded-lg text-[11px] font-semibold text-white cursor-pointer">
+          Скачать .json
+        </button>
+      </div>
     </div>
   )
 }
