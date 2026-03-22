@@ -1,6 +1,13 @@
 const BASE = 'https://media.progressusbot.ru'
 const API_KEY = import.meta.env.VITE_PUBLISH_API_KEY as string | undefined
 
+const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif'])
+
+export function isImageFile(filename: string): boolean {
+  const ext = '.' + filename.toLowerCase().split('.').pop()
+  return IMAGE_EXTENSIONS.has(ext)
+}
+
 export interface ConvertResult {
   text: string
   url: string
@@ -29,6 +36,23 @@ export async function convertDocument(file: File): Promise<ConvertResult> {
   const textRes = await fetch(url)
   const text = await textRes.text()
   return { text, url, fileName: file.name }
+}
+
+export async function describeImage(url: string): Promise<string> {
+  const res = await fetch(`${BASE}/api/vision/describe`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(API_KEY ? { 'X-API-Key': API_KEY } : {}),
+    },
+    body: JSON.stringify({ url }),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body?.error?.message ?? `Ошибка описания: ${res.status}`)
+  }
+  const data = await res.json()
+  return data.description ?? ''
 }
 
 export async function uploadImage(file: File): Promise<ImageUploadResult> {

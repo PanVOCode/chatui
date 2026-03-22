@@ -14,6 +14,7 @@ export type ChatPhase =
 export interface DocFile {
   url: string
   fileName: string
+  content?: string  // текст документа или описание картинки от AI
 }
 
 export interface DocEntry {

@@ -2,11 +2,9 @@ import { useRef, useState, useCallback, useEffect } from 'react'
 import type { Message } from '../types'
 import Drawer from './Drawer'
 import QuickReplies from './QuickReplies'
-import HoldEnterRing from './HoldEnterRing'
-import { useHoldEnter } from '../hooks/useHoldEnter'
 import type { VoiceState } from '../hooks/useVoiceRecorder'
 
-const FILE_ACCEPT = '.txt,.md,.markdown,.pdf,.docx,.odt,.rtf,.epub,.html,.htm,.csv,.json'
+const FILE_ACCEPT = '.txt,.md,.markdown,.pdf,.docx,.odt,.rtf,.epub,.html,.htm,.csv,.json,.jpg,.jpeg,.png,.gif,.webp,.bmp,.tiff'
 
 interface SectionFile { url: string; fileName: string }
 
@@ -66,14 +64,11 @@ export default function ChatDrawer({
     setStagedFiles([])
   }
 
-  const { progress: holdProgress, isHolding, onKeyDown, onKeyUp } = useHoldEnter({
-    onQuickSend: send,
-    onHoldComplete: () => {},
-  })
-
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    onKeyDown(e)
-    // Shift+Enter → перенос строки (не перехватываем)
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      send()
+    }
   }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -82,9 +77,6 @@ export default function ChatDrawer({
       e.target.value = ''
     }
   }
-
-  const activeRingProgress = holdProgress
-  const ringVisible = isHolding
 
   const error = voiceError ?? fileError
 
@@ -147,9 +139,6 @@ export default function ChatDrawer({
           onFocusCapture={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--color-accent)' }}
           onBlurCapture={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--color-border)' }}
         >
-          {/* Ring overlay */}
-          <HoldEnterRing progress={activeRingProgress} visible={ringVisible} />
-
           {voiceState !== 'idle' ? (
             <div className="flex items-center gap-3 px-3 py-3">
               <span className="text-[22px]">{voiceState === 'recording' ? '🎙' : '⏳'}</span>
@@ -178,7 +167,6 @@ export default function ChatDrawer({
               ref={inputRef} value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={handleKeyDown}
-              onKeyUp={onKeyUp}
               placeholder={stagedFiles.length > 0 ? `${stagedFiles.length} файл(а) готово к отправке` : 'Ответьте или загрузите документ…'}
               rows={2}
               className="w-full bg-transparent border-none outline-none text-[12px] resize-none px-3 py-2.5"
@@ -220,12 +208,6 @@ export default function ChatDrawer({
             </button>
           </div>
 
-          {isHolding && (
-            <div className="pb-1 text-center text-[9px]"
-              style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>
-              Удерживайте Enter для записи голоса…
-            </div>
-          )}
         </div>
       </div>
     </div>

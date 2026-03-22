@@ -31,6 +31,7 @@ import {
   isSkipReply,
 } from './lib/chatPhaseTransitions'
 import { recognizeSpeech } from './lib/speechKitApi'
+import { isImageFile } from './lib/publishApi'
 import { useVoiceRecorder } from './hooks/useVoiceRecorder'
 import { useFileUpload } from './hooks/useFileUpload'
 import type {
@@ -94,7 +95,7 @@ export default function App() {
   // ── Messages ──────────────────────────────────────────────────────────────
   const [messages, setMessages] = useState<Message[]>([{
     id: makeId(), role: 'agent', time: nowTime(), type: 'normal',
-    text: 'Привет! Я соберу данные для генерации прототипа.<br/><br/>Для начала загрузите документ или напишите что угодно.',
+    text: 'Привет! Я соберу данные для генерации прототипа.',
   }])
 
   // ── Undo/redo & versions ──────────────────────────────────────────────────
@@ -241,6 +242,23 @@ export default function App() {
             return 'edit_wishes'
           }
           // "Готово"
+          setDocCollection((docs) => {
+            const toOutput = (entry: DocEntry) => {
+              const docTexts = entry.files
+                .filter((f) => !isImageFile(f.fileName) && f.content)
+                .map((f) => f.content!)
+              const mergedText = [entry.text, ...docTexts].filter(Boolean).join('\n\n')
+              const images = entry.files.filter((f) => isImageFile(f.fileName))
+              return { text: mergedText, files: images }
+            }
+            const output = {
+              business: toOutput(docs.business),
+              guideline: toOutput(docs.guideline),
+              wishes: toOutput(docs.wishes),
+            }
+            console.log('[chatui] docCollection:', JSON.stringify(output, null, 2))
+            return docs
+          })
           setTimeout(() => addMsg({ role: 'agent', text: getPhasePrompt('done'), type: 'normal' }), 100)
           return 'done'
         }
@@ -278,8 +296,8 @@ export default function App() {
     for (const file of rawFiles) {
       addMsg({ role: 'system', text: `Загружаю <strong>${esc(file.name)}</strong>…`, type: 'system-context' })
       try {
-        const { url, fileName } = await uploadFile(file)
-        uploaded.push({ url, fileName })
+        const { url, fileName, content } = await uploadFile(file)
+        uploaded.push({ url, fileName, content })
         addMsg({ role: 'system', text: `Загружено: <strong>${esc(fileName)}</strong>`, type: 'system-context' })
       } catch (e) {
         addMsg({ role: 'system', text: `Ошибка: ${esc(e instanceof Error ? e.message : 'Ошибка загрузки')}`, type: 'system-context' })
