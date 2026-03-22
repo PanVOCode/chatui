@@ -31,7 +31,7 @@ import {
   isSkipReply,
 } from './lib/chatPhaseTransitions'
 import { recognizeSpeech } from './lib/speechKitApi'
-import { isImageFile } from './lib/publishApi'
+import { isImageFile, parsePdf } from './lib/publishApi'
 import { useVoiceRecorder } from './hooks/useVoiceRecorder'
 import { useFileUpload } from './hooks/useFileUpload'
 import type {
@@ -292,18 +292,34 @@ export default function App() {
   const handleSubmit = useCallback(async (typedText: string, rawFiles: File[]) => {
     const isEditPhase = chatPhase === 'edit_business' || chatPhase === 'edit_guideline' || chatPhase === 'edit_wishes'
     if (!typedText.trim() && rawFiles.length === 0 && !isEditPhase) return
+
     const uploaded: FileAttachment = []
+    const extractedTexts: string[] = []
+
     for (const file of rawFiles) {
       addMsg({ role: 'system', text: `Загружаю <strong>${esc(file.name)}</strong>…`, type: 'system-context' })
       try {
-        const { url, fileName, content } = await uploadFile(file)
-        uploaded.push({ url, fileName, content })
-        addMsg({ role: 'system', text: `Загружено: <strong>${esc(fileName)}</strong>`, type: 'system-context' })
+        if (file.name.toLowerCase().endsWith('.pdf')) {
+          const { text: pdfText, images } = await parsePdf(file)
+          if (pdfText) extractedTexts.push(pdfText)
+          for (const img of images) uploaded.push(img)
+          addMsg({
+            role: 'system',
+            text: `PDF обработан: ${images.length} изображений извлечено`,
+            type: 'system-context',
+          })
+        } else {
+          const { url, fileName, content } = await uploadFile(file)
+          uploaded.push({ url, fileName, content })
+          addMsg({ role: 'system', text: `Загружено: <strong>${esc(fileName)}</strong>`, type: 'system-context' })
+        }
       } catch (e) {
         addMsg({ role: 'system', text: `Ошибка: ${esc(e instanceof Error ? e.message : 'Ошибка загрузки')}`, type: 'system-context' })
       }
     }
-    dispatchChat(typedText.trim(), uploaded)
+
+    const combinedText = [typedText.trim(), ...extractedTexts].filter(Boolean).join('\n\n')
+    dispatchChat(combinedText, uploaded)
   }, [addMsg, uploadFile, dispatchChat, chatPhase])
 
   // ── DocsDrawer slot change (совместимость) ────────────────────────────────

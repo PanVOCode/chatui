@@ -38,6 +38,27 @@ export async function convertDocument(file: File): Promise<ConvertResult> {
   return { text, url, fileName: file.name }
 }
 
+export interface PdfParseResult {
+  text: string
+  images: Array<{ url: string; fileName: string; content: string }>
+}
+
+export async function parsePdf(file: File): Promise<PdfParseResult> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`${BASE}/api/publish/pdf-parse`, {
+    method: 'POST',
+    headers: API_KEY ? { 'X-API-Key': API_KEY } : {},
+    body: form,
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body?.error?.message ?? `Ошибка парсинга PDF: ${res.status}`)
+  }
+  const data = await res.json()
+  return data.data as PdfParseResult
+}
+
 export async function describeImage(url: string): Promise<string> {
   const res = await fetch(`${BASE}/api/vision/describe`, {
     method: 'POST',
