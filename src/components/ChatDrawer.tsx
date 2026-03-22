@@ -1,73 +1,231 @@
-import { useRef, useEffect, useState, useCallback } from 'react'
+import { useRef, useState, useCallback, useEffect } from 'react'
 import type { Message } from '../types'
 import Drawer from './Drawer'
+import QuickReplies from './QuickReplies'
+import HoldEnterRing from './HoldEnterRing'
+import { useHoldEnter } from '../hooks/useHoldEnter'
+import type { VoiceState } from '../hooks/useVoiceRecorder'
+
+const FILE_ACCEPT = '.txt,.md,.markdown,.pdf,.docx,.odt,.rtf,.epub,.html,.htm,.csv,.json'
+
+interface SectionFile { url: string; fileName: string }
 
 interface Props {
   open: boolean
   messages: Message[]
+  quickReplies: string[]
+  voiceState: VoiceState
+  voiceElapsed: number
+  voiceError: string | null
+  prefillText?: string
+  prefillKey?: number
+  sectionFiles?: SectionFile[]
+  onRemoveSectionFile?: (index: number) => void
+  canSubmitEmpty?: boolean
   onClose: () => void
-  onSend: (text: string) => void
-  onFileUpload: () => void
+  onSubmit: (text: string, files: File[]) => void
+  onVoiceStart: () => void
+  onVoiceStop: () => void
+  onVoiceCancel: () => void
 }
 
-export default function ChatDrawer({ open, messages, onClose, onSend, onFileUpload }: Props) {
-  const [value, setValue] = useState('')
-  const [hasExternalContent, setHasExternalContent] = useState(false)
-  const listRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLTextAreaElement>(null)
+export default function ChatDrawer({
+  open, messages, quickReplies,
+  voiceState, voiceElapsed, voiceError,
+  prefillText, prefillKey, sectionFiles = [], onRemoveSectionFile,
+  canSubmitEmpty,
+  onClose, onSubmit,
+  onVoiceStart, onVoiceStop, onVoiceCancel,
+}: Props) {
+  const [value, setValue]             = useState('')
+  const [stagedFiles, setStagedFiles] = useState<File[]>([])
+  const [fileError, setFileError]     = useState<string | null>(null)
 
+  // Заполняем поле ввода при смене фазы на редактирование (только по prefillKey)
   useEffect(() => {
+    if (prefillKey !== undefined && prefillText !== undefined) {
+      setValue(prefillText)
+      setTimeout(() => inputRef.current?.focus(), 50)
+    }
+  }, [prefillKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const listRef    = useRef<HTMLDivElement>(null)
+  const inputRef   = useRef<HTMLTextAreaElement>(null)
+  const fileRef    = useRef<HTMLInputElement>(null)
+
+  function scrollBottom() {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight
-  }, [messages])
+  }
 
-  useEffect(() => {
-    setHasExternalContent(/https?:\/\/|игнорируй|ignore|system:|<\/?[a-z]+>/i.test(value))
-  }, [value])
-
-  function handleSend() {
+  function send() {
     const t = value.trim()
-    if (!t) return
+    if (!t && stagedFiles.length === 0 && !canSubmitEmpty) return
+    setFileError(null)
     setValue('')
-    onSend(t)
+    onSubmit(t, stagedFiles)
+    setStagedFiles([])
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
+  const { progress: holdProgress, isHolding, onKeyDown, onKeyUp } = useHoldEnter({
+    onQuickSend: send,
+    onHoldComplete: () => {},
+  })
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    onKeyDown(e)
+    // Shift+Enter → перенос строки (не перехватываем)
   }
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    if (e.target.files) {
+      setStagedFiles((p) => [...p, ...Array.from(e.target.files!)])
+      e.target.value = ''
+    }
+  }
+
+  const activeRingProgress = holdProgress
+  const ringVisible = isHolding
+
+  const error = voiceError ?? fileError
 
   const footer = (
     <div className="shrink-0" style={{ borderTop: '1px solid var(--color-border)' }}>
-      {hasExternalContent && (
-        <div className="mx-3 mt-2 flex items-start gap-2 px-3 py-2 rounded-lg text-[10px]"
-          style={{ background: 'rgba(239,68,68,.08)', border: '1px solid rgba(239,68,68,.2)', color: '#f87171' }}>
-          <span>⚠️</span><span>Сообщение содержит внешние ссылки или потенциальные инструкции.</span>
+
+      <QuickReplies replies={quickReplies} onSelect={(r) => { onSubmit(r, []); scrollBottom() }} />
+
+      {error && (
+        <div className="mx-3 mt-2 px-3 py-2 rounded-lg text-[10px]"
+          style={{ background: 'rgba(239,68,68,.1)', color: '#ef4444' }}>
+          {error}
         </div>
       )}
+
+      {/* Файлы текущего раздела (уже загруженные) */}
+      {sectionFiles.length > 0 && (
+        <div className="mx-3 mt-2">
+          <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>
+            Загружено в этот раздел
+          </div>
+          <ul className="flex flex-col gap-1">
+            {sectionFiles.map((f, i) => (
+              <li key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px]"
+                style={{ background: 'var(--color-s1)', border: '1px solid var(--color-border)' }}>
+                <a href={f.url} target="_blank" rel="noreferrer" className="flex-1 truncate"
+                  style={{ color: 'var(--color-accent)', textDecoration: 'none' }}>
+                  {f.fileName}
+                </a>
+                {onRemoveSectionFile && (
+                  <button type="button" onClick={() => onRemoveSectionFile(i)}
+                    style={{ background: 'none', border: 'none', color: 'var(--color-muted)', fontSize: 11, cursor: 'pointer', lineHeight: 1 }}>
+                    ✕
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Новые файлы в очереди на отправку */}
+      {stagedFiles.length > 0 && (
+        <ul className="mx-3 mt-2 flex flex-col gap-1">
+          {stagedFiles.map((f, i) => (
+            <li key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[11px]"
+              style={{ background: 'var(--color-s1)', border: '1px solid var(--color-border)', color: 'var(--color-ink)' }}>
+              <span className="flex-1 truncate">{f.name}</span>
+              <button type="button"
+                onClick={() => setStagedFiles((p) => p.filter((_, j) => j !== i))}
+                style={{ background: 'none', border: 'none', color: 'var(--color-muted)', fontSize: 10, cursor: 'pointer' }}>✕</button>
+            </li>
+          ))}
+        </ul>
+      )}
+
       <div className="p-3">
-        <div
-          className="rounded-xl overflow-hidden interactive"
+        <div className="relative rounded-xl overflow-visible interactive"
           style={{ border: '1px solid var(--color-border)', background: 'var(--color-s1)' }}
           onFocusCapture={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--color-accent)' }}
           onBlurCapture={(e) => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--color-border)' }}
         >
-          <textarea
-            ref={inputRef} value={value}
-            onChange={(e) => setValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Опишите задачу или задайте вопрос…"
-            rows={2}
-            className="w-full bg-transparent border-none outline-none text-[12px] resize-none px-3 py-2.5"
-            style={{ color: 'var(--color-ink)', fontFamily: 'var(--font-body)', maxHeight: 100 }}
-          />
+          {/* Ring overlay */}
+          <HoldEnterRing progress={activeRingProgress} visible={ringVisible} />
+
+          {voiceState !== 'idle' ? (
+            <div className="flex items-center gap-3 px-3 py-3">
+              <span className="text-[22px]">{voiceState === 'recording' ? '🎙' : '⏳'}</span>
+              <span className="flex-1 text-[12px]" style={{ color: 'var(--color-ink)' }}>
+                {voiceState === 'recording'
+                  ? `Говорите… ${voiceElapsed}с`
+                  : 'Распознаю речь…'}
+              </span>
+              {voiceState === 'recording' && (
+                <>
+                  <button type="button" onClick={onVoiceStop}
+                    className="interactive text-[10px] px-2 py-1 rounded cursor-pointer"
+                    style={{ border: '1px solid var(--color-accent)', background: 'var(--color-accent-lo)', color: 'var(--color-accent)', fontWeight: 600 }}>
+                    Стоп
+                  </button>
+                  <button type="button" onClick={onVoiceCancel}
+                    className="interactive text-[10px] px-2 py-1 rounded cursor-pointer"
+                    style={{ border: '1px solid var(--color-border)', background: 'transparent', color: 'var(--color-muted)' }}>
+                    Отмена
+                  </button>
+                </>
+              )}
+            </div>
+          ) : (
+            <textarea
+              ref={inputRef} value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onKeyUp={onKeyUp}
+              placeholder={stagedFiles.length > 0 ? `${stagedFiles.length} файл(а) готово к отправке` : 'Ответьте или загрузите документ…'}
+              rows={2}
+              className="w-full bg-transparent border-none outline-none text-[12px] resize-none px-3 py-2.5"
+              style={{ color: 'var(--color-ink)', fontFamily: 'var(--font-body)', maxHeight: 120 }}
+            />
+          )}
+
           <div className="flex items-center gap-1 px-2 pb-2">
-            <ToolBtn icon={<AttachIcon />} label="Прикрепить" onClick={onFileUpload} />
-            <ToolBtn icon={<ImageIcon />} label="Макет" onClick={onFileUpload} />
-            <ToolBtn icon={<MicIcon />} label="Голос" onClick={() => {}} />
+            <input ref={fileRef} type="file" multiple accept={FILE_ACCEPT} className="sr-only"
+              onChange={handleFileChange} />
+            <ToolBtn icon={<AttachIcon />} label="Прикрепить документ" onClick={() => fileRef.current?.click()} />
+
             <div className="flex-1" />
-            <button onClick={handleSend}
+
+            {/* Mic button — click to start, Стоп/Отмена to stop */}
+            <button
+              type="button"
+              title="Голосовой ввод"
+              disabled={voiceState === 'transcribing'}
+              className="interactive flex items-center justify-center w-7 h-7 rounded-full cursor-pointer"
+              style={{
+                border: voiceState === 'recording' ? '2px solid var(--color-accent)' : 'none',
+                background: voiceState === 'recording' ? 'var(--color-accent-lo)' : 'transparent',
+                color: voiceState === 'recording' ? 'var(--color-accent)' : 'var(--color-muted)',
+              }}
+              onClick={() => { if (voiceState === 'idle') onVoiceStart() }}
+            >
+              <MicIcon active={voiceState === 'recording'} />
+            </button>
+
+            <button
+              type="button"
+              onClick={send}
+              disabled={voiceState !== 'idle'}
               className="btn-gradient flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-white text-[11px] font-semibold cursor-pointer"
-            ><SendIcon />Отправить</button>
+            >
+              <SendIcon />
+              {stagedFiles.length > 0 ? `Отправить (${stagedFiles.length})` : 'Отправить'}
+            </button>
           </div>
+
+          {isHolding && (
+            <div className="pb-1 text-center text-[9px]"
+              style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>
+              Удерживайте Enter для записи голоса…
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -86,6 +244,8 @@ export default function ChatDrawer({ open, messages, onClose, onSend, onFileUplo
     </Drawer>
   )
 }
+
+// ─── Message rendering ───────────────────────────────────────────────────────
 
 function MsgItem({ msg }: { msg: Message }) {
   if (msg.type === 'json-result') return <JsonResultMsg msg={msg} />
@@ -164,9 +324,7 @@ function JsonResultMsg({ msg }: { msg: Message }) {
     const blob = new Blob([json], { type: 'application/json' })
     const url  = URL.createObjectURL(blob)
     const a    = document.createElement('a')
-    a.href     = url
-    a.download = 'langgraph_input.json'
-    a.click()
+    a.href = url; a.download = 'langgraph_input.json'; a.click()
     URL.revokeObjectURL(url)
   }, [json])
 
@@ -176,7 +334,8 @@ function JsonResultMsg({ msg }: { msg: Message }) {
         <span className="text-[11px] font-semibold" style={{ color: 'var(--color-ink)' }}>🎉 {msg.text}</span>
         <span className="text-[9px] ml-auto" style={{ color: 'var(--color-muted)', fontFamily: 'var(--font-mono)' }}>{msg.time}</span>
       </div>
-      <pre className="px-3 py-2.5 text-[10px] overflow-x-auto leading-relaxed" style={{ color: 'var(--color-muted-hi)', fontFamily: 'var(--font-mono)', maxHeight: 320, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+      <pre className="px-3 py-2.5 text-[10px] overflow-x-auto leading-relaxed"
+        style={{ color: 'var(--color-muted-hi)', fontFamily: 'var(--font-mono)', maxHeight: 320, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
         {json}
       </pre>
       <div className="flex gap-2 px-3 pb-3">
@@ -186,13 +345,15 @@ function JsonResultMsg({ msg }: { msg: Message }) {
           {copied ? '✓ Скопировано' : 'Копировать JSON'}
         </button>
         <button type="button" onClick={download}
-          className="btn-gradient interactive px-3 py-1.5 rounded-lg text-[11px] font-semibold text-white cursor-pointer">
+          className="btn-gradient px-4 py-1.5 rounded-lg text-[11px] font-semibold text-white cursor-pointer">
           Скачать .json
         </button>
       </div>
     </div>
   )
 }
+
+// ─── Small icons ─────────────────────────────────────────────────────────────
 
 function ToolBtn({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
   return (
@@ -203,7 +364,21 @@ function ToolBtn({ icon, label, onClick }: { icon: React.ReactNode; label: strin
   )
 }
 
-function AttachIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg> }
-function ImageIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> }
-function MicIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> }
-function SendIcon() { return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> }
+function AttachIcon() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
+}
+
+function MicIcon({ active }: { active: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={active ? 2.2 : 1.8}>
+      <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
+      <path d="M19 10v2a7 7 0 01-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
+    </svg>
+  )
+}
+
+function SendIcon() {
+  return <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+}

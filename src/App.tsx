@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react'
-import { QUESTIONS, buildLanggraphInput, type QuestionnaireAnswers } from './lib/questionnaire'
 import TopBar from './components/TopBar'
 import IconRail from './components/IconRail'
 import CenterPreview from './components/CenterPreview'
@@ -11,7 +10,7 @@ import VersionTimeline from './components/VersionTimeline'
 import FullscreenOverlay from './components/FullscreenOverlay'
 import OnboardingTour from './components/OnboardingTour'
 import { ONBOARDING_STORAGE_KEY } from './data/onboardingTour'
-import { TEMPLATES, detectTemplate, mutateTemplate } from './data/templates'
+// import { TEMPLATES, detectTemplate, mutateTemplate } from './data/templates'
 import {
   DEFAULT_DESKTOP_RESOLUTION_ID,
   DEFAULT_MOBILE_RESOLUTION_ID,
@@ -25,13 +24,24 @@ import {
   type ProjectUndoSnapshot,
   type SiteVersionEntry,
 } from './lib/undoTypes'
+import {
+  getPhasePrompt,
+  getQuickReplies,
+  validateDocCollection,
+  isSkipReply,
+} from './lib/chatPhaseTransitions'
+import { recognizeSpeech } from './lib/speechKitApi'
+import { useVoiceRecorder } from './hooks/useVoiceRecorder'
+import { useFileUpload } from './hooks/useFileUpload'
 import type {
   AgentStep,
   BTSummary,
-  ComplianceItem,
+  ChatPhase,
+  DocCollection,
+  DocEntry,
+  DocFile,
   DrawerKind,
   Message,
-  Recommendation,
   RequirementDocument,
   Requirements,
   VariantData,
@@ -39,73 +49,289 @@ import type {
   ViewMode,
 } from './types'
 
-const VARIANT_IDS: VariantId[] = ['A', 'B', 'C']
-
 function makeId() { return Math.random().toString(36).slice(2) }
 function nowTime() { return new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) }
-function sleep(ms: number) { return new Promise<void>((r) => setTimeout(r, ms)) }
+function esc(s: string) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
 
-const AGENT_STEPS: Array<{ step: AgentStep; label: string }> = [
-  { step: 1, label: 'Разбираю задачу…' },
-  { step: 2, label: 'Генерирую вариант A…' },
-  { step: 3, label: 'Генерирую варианты B и C…' },
-  { step: 4, label: 'Готово' },
-]
+const EMPTY_ENTRY: DocEntry = { text: '', files: [] }
+const EMPTY_DOCS: DocCollection = { business: EMPTY_ENTRY, guideline: EMPTY_ENTRY, wishes: EMPTY_ENTRY }
 
 export default function App() {
-  const [view, setView] = useState<ViewMode>('desktop')
-  const [currentVariant, setCurrentVariant] = useState<VariantId>('A')
-  const [projectName, setProjectName] = useState('Без названия')
-  const [tokenCount, setTokenCount] = useState(0)
-  const [fullscreen, setFullscreen] = useState(false)
+  // ── UI state ──────────────────────────────────────────────────────────────
+  const [view, setView]                         = useState<ViewMode>('desktop')
+  const [currentVariant, setCurrentVariant]     = useState<VariantId>('A')
+  const [projectName, setProjectName]           = useState('Без названия')
+  const [tokenCount, setTokenCount]             = useState(0)
+  const [fullscreen, setFullscreen]             = useState(false)
   const [desktopResolutionId, setDesktopResolutionId] = useState(DEFAULT_DESKTOP_RESOLUTION_ID)
-  const [mobileResolutionId, setMobileResolutionId] = useState(DEFAULT_MOBILE_RESOLUTION_ID)
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [agentStep, setAgentStep] = useState<AgentStep>(0)
-  const [agentLabel, setAgentLabel] = useState('')
-  const [activeDrawer, setActiveDrawer] = useState<DrawerKind>(null)
+  const [mobileResolutionId, setMobileResolutionId]   = useState(DEFAULT_MOBILE_RESOLUTION_ID)
+  const [isGenerating]                          = useState(false)
+  const [agentStep, setAgentStep]               = useState<AgentStep>(0)
+  const [agentLabel, setAgentLabel]             = useState('')
+  const [activeDrawer, setActiveDrawer]         = useState<DrawerKind>(null)
+  const [tourOpen, setTourOpen]                 = useState(false)
+
+  // ── Requirements (для DocsDrawer совместимости) ───────────────────────────
   const [requirements, setRequirements] = useState<Requirements>({
     business: { raw: '', summary: null },
     guideline: { raw: '', summary: null },
   })
+
+  // ── Variants ──────────────────────────────────────────────────────────────
   const [variants, setVariants] = useState<VariantData[]>([
     { id: 'A', label: 'Вариант A', html: null, url: null, status: 'empty' },
     { id: 'B', label: 'Вариант B', html: null, url: null, status: 'empty' },
     { id: 'C', label: 'Вариант C', html: null, url: null, status: 'empty' },
   ])
-  const [tourOpen, setTourOpen] = useState(false)
-  const [messages, setMessages] = useState<Message[]>([
-    { id: makeId(), role: 'agent', text: 'Привет! Я помогу собрать данные для генерации прототипа сайта. Отвечайте на вопросы — в конце получите готовый JSON для агента.<br/><br/>Напишите что угодно, чтобы начать опрос.', time: nowTime(), type: 'normal' },
-  ])
 
-  const [undoPast, setUndoPast] = useState<ProjectUndoSnapshot[]>([])
-  const [undoFuture, setUndoFuture] = useState<ProjectUndoSnapshot[]>([])
-  const [siteVersions, setSiteVersions] = useState<SiteVersionEntry[]>([])
+  // ── Chat phase machine ────────────────────────────────────────────────────
+  const [chatPhase, setChatPhase]         = useState<ChatPhase>('greet')
+  const [docCollection, setDocCollection] = useState<DocCollection>(EMPTY_DOCS)
+  // prefillText/prefillKey: only set when entering an edit phase (not derived live from docCollection)
+  const [prefillText, setPrefillText]     = useState<string | undefined>(undefined)
+  const [prefillKey, setPrefillKey]       = useState(0)
+
+  // ── Messages ──────────────────────────────────────────────────────────────
+  const [messages, setMessages] = useState<Message[]>([{
+    id: makeId(), role: 'agent', time: nowTime(), type: 'normal',
+    text: 'Привет! Я соберу данные для генерации прототипа.<br/><br/>Для начала загрузите документ или напишите что угодно.',
+  }])
+
+  // ── Undo/redo & versions ──────────────────────────────────────────────────
+  const [undoPast, setUndoPast]             = useState<ProjectUndoSnapshot[]>([])
+  const [undoFuture, setUndoFuture]         = useState<ProjectUndoSnapshot[]>([])
+  const [siteVersions, setSiteVersions]     = useState<SiteVersionEntry[]>([])
   const [activeVersionId, setActiveVersionId] = useState<string | null>(null)
 
-  // Questionnaire state
-  const [qStep, setQStep] = useState<number>(0) // 0 = not started, -1 = done
-  const [qAnswers, setQAnswers] = useState<QuestionnaireAnswers>({})
-  const qStarted = useRef(false)
-
-  const snapshotRef = useRef<ProjectUndoSnapshot | null>(null)
+  const snapshotRef          = useRef<ProjectUndoSnapshot | null>(null)
   const recordVersionAfterGen = useRef(false)
 
   useEffect(() => {
     snapshotRef.current = { variants, requirements, messages, currentVariant, tokenCount, agentStep, agentLabel }
   }, [variants, requirements, messages, currentVariant, tokenCount, agentStep, agentLabel])
 
-  const pushUndoSnapshot = useCallback((snap: ProjectUndoSnapshot) => {
-    setUndoPast((p) => [...p.slice(-(MAX_UNDO_DEPTH - 1)), cloneProjectSnapshot(snap)])
-    setUndoFuture([])
+  // ── Voice ─────────────────────────────────────────────────────────────────
+  const handleAudioReady = useCallback(async (blob: Blob) => {
+    const text = await recognizeSpeech(blob)
+    if (text) dispatchChat(text)
   }, [])
 
+  const { voiceState, elapsed: voiceElapsed, error: voiceError, startRecording, stopRecording, cancelRecording } =
+    useVoiceRecorder(handleAudioReady)
+
+  // ── File upload ───────────────────────────────────────────────────────────
+  const { uploadFile } = useFileUpload()
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  const addMsg = useCallback((msg: Omit<Message, 'id' | 'time'>) => {
+    setMessages((prev) => [...prev, { ...msg, id: makeId(), time: nowTime() }])
+  }, [])
+
+  // ── Chat phase state machine ──────────────────────────────────────────────
+  type FileAttachment = DocFile[]
+
+  function setEntry(field: keyof DocCollection, text: string, newFiles: FileAttachment) {
+    setDocCollection((prev) => ({
+      ...prev,
+      [field]: {
+        text: text || prev[field].text,
+        files: [...prev[field].files, ...newFiles],
+      },
+    }))
+  }
+
+  function entryDesc(e: DocEntry): string {
+    const parts: string[] = []
+    if (e.text) parts.push(esc(e.text.slice(0, 120)) + (e.text.length > 120 ? '…' : ''))
+    e.files.forEach((f) => parts.push(
+      `<a href="${f.url}" target="_blank" style="color:var(--color-accent)">${esc(f.fileName)}</a>`
+    ))
+    return parts.join('<br/>')
+  }
+
+  function goToReview() {
+    setDocCollection((docs) => {
+      if (!validateDocCollection(docs)) {
+        addMsg({ role: 'agent', type: 'normal', text: 'Нужен хотя бы один документ. Загрузите что-нибудь.' })
+        setChatPhase('business_collect')
+        setTimeout(() => addMsg({ role: 'agent', text: getPhasePrompt('business_collect'), type: 'normal' }), 300)
+      } else {
+        const summary = [
+          `Бизнес: ${docs.business.text || docs.business.files.length ? entryDesc(docs.business) : '—'}`,
+          `Гайдлайн: ${docs.guideline.text || docs.guideline.files.length ? entryDesc(docs.guideline) : '—'}`,
+          `Пожелания: ${docs.wishes.text || docs.wishes.files.length ? entryDesc(docs.wishes) : '—'}`,
+        ].join('<br/>')
+        addMsg({ role: 'agent', text: `${getPhasePrompt('review')}<br/><br/>${summary}`, type: 'normal' })
+        setChatPhase('review')
+      }
+      return docs
+    })
+  }
+
+  const dispatchChat = useCallback((text: string, files: FileAttachment = []) => {
+    const fileNames = files.map((f) => esc(f.fileName)).join(', ')
+    const display = text || (fileNames ? fileNames : '')
+    if (display) addMsg({ role: 'user', text: display, type: 'normal' })
+
+    setChatPhase((phase) => {
+      const skip = isSkipReply(text) && files.length === 0
+
+      switch (phase) {
+        case 'greet': {
+          setTimeout(() => addMsg({ role: 'agent', text: getPhasePrompt('business_collect'), type: 'normal' }), 100)
+          return 'business_collect'
+        }
+
+        case 'business_collect': {
+          if (!skip) setEntry('business', text, files)
+          setTimeout(() => addMsg({ role: 'agent', text: getPhasePrompt('guideline_collect'), type: 'normal' }), 100)
+          return 'guideline_collect'
+        }
+
+        case 'guideline_collect': {
+          if (!skip) setEntry('guideline', text, files)
+          setTimeout(() => addMsg({ role: 'agent', text: getPhasePrompt('wishes_collect'), type: 'normal' }), 100)
+          return 'wishes_collect'
+        }
+
+        case 'wishes_collect': {
+          if (!skip) setEntry('wishes', text, files)
+          setTimeout(() => goToReview(), 100)
+          return 'wishes_collect'
+        }
+
+        case 'review': {
+          if (/бизнес/i.test(text)) {
+            setDocCollection((docs) => {
+              setPrefillText(docs.business.text)
+              setPrefillKey((k) => k + 1)
+              const desc = entryDesc(docs.business)
+              const msg = desc
+                ? `Текущее:<br/>${desc}<br/><br/>${getPhasePrompt('edit_business')}`
+                : getPhasePrompt('edit_business')
+              setTimeout(() => addMsg({ role: 'agent', text: msg, type: 'normal' }), 100)
+              return docs
+            })
+            return 'edit_business'
+          }
+          if (/гайд/i.test(text)) {
+            setDocCollection((docs) => {
+              setPrefillText(docs.guideline.text)
+              setPrefillKey((k) => k + 1)
+              const desc = entryDesc(docs.guideline)
+              const msg = desc
+                ? `Текущее:<br/>${desc}<br/><br/>${getPhasePrompt('edit_guideline')}`
+                : getPhasePrompt('edit_guideline')
+              setTimeout(() => addMsg({ role: 'agent', text: msg, type: 'normal' }), 100)
+              return docs
+            })
+            return 'edit_guideline'
+          }
+          if (/пожелани/i.test(text)) {
+            setDocCollection((docs) => {
+              setPrefillText(docs.wishes.text)
+              setPrefillKey((k) => k + 1)
+              const desc = entryDesc(docs.wishes)
+              const msg = desc
+                ? `Текущее:<br/>${desc}<br/><br/>${getPhasePrompt('edit_wishes')}`
+                : getPhasePrompt('edit_wishes')
+              setTimeout(() => addMsg({ role: 'agent', text: msg, type: 'normal' }), 100)
+              return docs
+            })
+            return 'edit_wishes'
+          }
+          // "Готово"
+          setTimeout(() => addMsg({ role: 'agent', text: getPhasePrompt('done'), type: 'normal' }), 100)
+          return 'done'
+        }
+
+        case 'edit_business': {
+          if (!skip) setEntry('business', text, files)
+          setPrefillText(undefined)
+          setTimeout(() => goToReview(), 100)
+          return 'edit_business'
+        }
+        case 'edit_guideline': {
+          if (!skip) setEntry('guideline', text, files)
+          setPrefillText(undefined)
+          setTimeout(() => goToReview(), 100)
+          return 'edit_guideline'
+        }
+        case 'edit_wishes': {
+          if (!skip) setEntry('wishes', text, files)
+          setPrefillText(undefined)
+          setTimeout(() => goToReview(), 100)
+          return 'edit_wishes'
+        }
+
+        default:
+          return phase
+      }
+    })
+  }, [addMsg])
+
+  // ── Submit (текст + файлы вместе) ─────────────────────────────────────────
+  const handleSubmit = useCallback(async (typedText: string, rawFiles: File[]) => {
+    const isEditPhase = chatPhase === 'edit_business' || chatPhase === 'edit_guideline' || chatPhase === 'edit_wishes'
+    if (!typedText.trim() && rawFiles.length === 0 && !isEditPhase) return
+    const uploaded: FileAttachment = []
+    for (const file of rawFiles) {
+      addMsg({ role: 'system', text: `Загружаю <strong>${esc(file.name)}</strong>…`, type: 'system-context' })
+      try {
+        const { url, fileName } = await uploadFile(file)
+        uploaded.push({ url, fileName })
+        addMsg({ role: 'system', text: `Загружено: <strong>${esc(fileName)}</strong>`, type: 'system-context' })
+      } catch (e) {
+        addMsg({ role: 'system', text: `Ошибка: ${esc(e instanceof Error ? e.message : 'Ошибка загрузки')}`, type: 'system-context' })
+      }
+    }
+    dispatchChat(typedText.trim(), uploaded)
+  }, [addMsg, uploadFile, dispatchChat, chatPhase])
+
+  // ── DocsDrawer slot change (совместимость) ────────────────────────────────
+  const handleSlotDocumentChange = useCallback((slot: 'business' | 'guideline', doc: RequirementDocument) => {
+    setRequirements((prev) => ({ ...prev, [slot]: doc }))
+    if (doc.raw) {
+      setDocCollection((prev) => ({
+        ...prev,
+        [slot]: {
+          text: doc.raw,
+          files: doc.fileUrl ? [{ url: doc.fileUrl, fileName: doc.fileName ?? '' }] : [],
+        },
+      }))
+      addMsg({ role: 'system', text: `<strong>${slot === 'business' ? 'Бизнес-требования' : 'Guideline'}</strong>: загружено <strong>${doc.fileName ?? 'текст'}</strong>`, type: 'system-context' })
+    }
+  }, [addMsg])
+
+  // ── Undo/redo ─────────────────────────────────────────────────────────────
   const applySnapshot = useCallback((s: ProjectUndoSnapshot) => {
     const c = cloneProjectSnapshot(s)
     setVariants(c.variants); setRequirements(c.requirements); setMessages(c.messages)
     setCurrentVariant(c.currentVariant); setTokenCount(c.tokenCount)
     setAgentStep(c.agentStep); setAgentLabel(c.agentLabel)
   }, [])
+
+  const undo = useCallback(() => {
+    if (isGenerating) return
+    setUndoPast((p) => {
+      if (!p.length) return p
+      const prev = p[p.length - 1]!
+      setUndoFuture((f) => [cloneProjectSnapshot(snapshotRef.current!), ...f].slice(0, MAX_UNDO_DEPTH))
+      applySnapshot(prev)
+      return p.slice(0, -1)
+    })
+  }, [isGenerating, applySnapshot])
+
+  const redo = useCallback(() => {
+    if (isGenerating) return
+    setUndoFuture((f) => {
+      if (!f.length) return f
+      const next = f[0]!
+      setUndoPast((p) => [...p, cloneProjectSnapshot(snapshotRef.current!)].slice(-MAX_UNDO_DEPTH))
+      applySnapshot(next)
+      return f.slice(1)
+    })
+  }, [isGenerating, applySnapshot])
 
   const restoreSiteVersion = useCallback((entry: SiteVersionEntry) => {
     if (isGenerating) return
@@ -121,50 +347,16 @@ export default function App() {
     recordVersionAfterGen.current = false
     const snap = cloneProjectSnapshot({ variants, requirements, messages, currentVariant, tokenCount, agentStep, agentLabel })
     const entryId = makeId()
-    setSiteVersions((prev) => [...prev, {
-      id: entryId, title: 'Генерация вариантов A–C',
-      subtitle: projectName.trim() && projectName !== 'Без названия' ? projectName : undefined,
-      createdAt: Date.now(), status: 'draft', snapshot: snap,
-    }])
+    setSiteVersions((prev) => [...prev, { id: entryId, title: 'Генерация вариантов A–C', createdAt: Date.now(), status: 'draft', snapshot: snap }])
     setActiveVersionId(entryId)
-  }, [isGenerating, agentStep, variants, requirements, messages, currentVariant, tokenCount, agentLabel, projectName])
+  }, [isGenerating, agentStep, variants, requirements, messages, currentVariant, tokenCount, agentLabel])
 
-  const undo = useCallback(() => {
-    if (isGenerating) return
-    setUndoPast((p) => {
-      if (p.length === 0) return p
-      const prev = p[p.length - 1]!
-      setUndoFuture((f) => [cloneProjectSnapshot(snapshotRef.current!), ...f].slice(0, MAX_UNDO_DEPTH))
-      applySnapshot(prev)
-      return p.slice(0, -1)
-    })
-  }, [isGenerating, applySnapshot])
-
-  const redo = useCallback(() => {
-    if (isGenerating) return
-    setUndoFuture((f) => {
-      if (f.length === 0) return f
-      const next = f[0]!
-      setUndoPast((p) => [...p, cloneProjectSnapshot(snapshotRef.current!)].slice(-MAX_UNDO_DEPTH))
-      applySnapshot(next)
-      return f.slice(1)
-    })
-  }, [isGenerating, applySnapshot])
-
+  // ── Tour & keyboard ───────────────────────────────────────────────────────
   useEffect(() => {
     try {
       const v = localStorage.getItem(ONBOARDING_STORAGE_KEY)
       if (v !== 'completed' && v !== 'dismissed' && v !== 'done') setTourOpen(true)
     } catch { /* storage blocked */ }
-  }, [])
-
-  const dismissTour = useCallback(() => {
-    try { localStorage.setItem(ONBOARDING_STORAGE_KEY, 'dismissed') } catch { /* */ }
-    setTourOpen(false)
-  }, [])
-  const completeTour = useCallback(() => {
-    try { localStorage.setItem(ONBOARDING_STORAGE_KEY, 'completed') } catch { /* */ }
-    setTourOpen(false)
   }, [])
 
   useEffect(() => {
@@ -178,180 +370,27 @@ export default function App() {
       if (e.key === '3') { setActiveDrawer((d) => d === 'docs' ? null : 'docs'); return }
       if (e.key === '4') { setActiveDrawer((d) => d === 'agent' ? null : 'agent'); return }
       if (e.key === 'Escape') { setActiveDrawer(null); return }
-      if (e.ctrlKey || e.metaKey) {
-        if (e.key === 'z' || e.key === 'Z') { e.preventDefault(); e.shiftKey ? redo() : undo() }
-        else if (e.key === 'y' || e.key === 'Y') { e.preventDefault(); redo() }
-      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); e.shiftKey ? redo() : undo() }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo() }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [isGenerating, undo, redo, tourOpen])
 
-  /* ── Helpers ── */
-  const addMsg = useCallback((msg: Omit<Message, 'id' | 'time'>) => {
-    setMessages((prev) => [...prev, { ...msg, id: makeId(), time: nowTime() }])
-  }, [])
-
-  const updateVariant = useCallback((id: VariantId, patch: Partial<VariantData>) => {
-    setVariants((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)))
-  }, [])
-
-  function advanceStep(step: AgentStep) {
-    setAgentStep(step)
-    setAgentLabel(AGENT_STEPS.find((s) => s.step === step)?.label ?? '')
-  }
-
-  /* ── Generate ── */
-  const handleGenerate = useCallback(async (prompt: string) => {
-    if (isGenerating) return
-    recordVersionAfterGen.current = true
-    setIsGenerating(true)
-
-    const userMsg: Message = { id: makeId(), role: 'user', text: prompt, time: nowTime(), type: 'normal' }
-    const messagesWithUser = [...messages, userMsg]
-    setMessages(messagesWithUser)
-
-    pushUndoSnapshot({ variants, requirements, messages: messagesWithUser, currentVariant, tokenCount, agentStep, agentLabel })
-
-    if (requirements.business.summary || requirements.guideline.summary) {
-      addMsg({ role: 'system', text: 'Учитываю загруженные бизнес-требования и guideline при генерации.', type: 'system-context' })
-    }
-
-    advanceStep(1); await sleep(800)
-    VARIANT_IDS.forEach((id) => updateVariant(id, { status: 'generating', html: null, url: null }))
-    advanceStep(2); await sleep(1100)
-
-    const key = detectTemplate(prompt)
-    const base = TEMPLATES[key]
-    updateVariant('A', { html: base, status: 'ready' })
-    setCurrentVariant('A')
-    addMsg({ role: 'agent', text: `✅ Вариант <strong>A</strong> готов — сгенерировал на основе «${escHtml(prompt)}».`, type: 'normal' })
-
-    advanceStep(3); await sleep(900)
-    updateVariant('B', { html: mutateTemplate(base, 2), status: 'ready' })
-    updateVariant('C', { html: mutateTemplate(base, 3), status: 'ready' })
-    advanceStep(4)
-    setTokenCount((t) => t + 1800 + Math.floor(Math.random() * 400))
-
-    const merged = mergeDocumentsForCompliance(requirements.business, requirements.guideline)
-    const compliance: ComplianceItem[] = merged ? buildCompliance(merged) : [
-      { label: 'Навигация реализована', status: 'ok' },
-      { label: 'Мобильная адаптация', status: 'question' },
-      { label: 'Форма обратной связи', status: 'ok' },
-    ]
-    addMsg({ role: 'agent', text: '', type: 'compliance', compliance })
-    await sleep(600)
-
-    const recommendations: Recommendation[] = [
-      { title: 'Добавьте онбординг для новых пользователей', reason: 'Целевая аудитория — новые пользователи; без подсказок удержание снижается на 30–40%.' },
-      { title: 'Упростите главный CTA до одного действия', reason: 'Сейчас три конкурирующих кнопки на первом экране снижают конверсию.' },
-    ]
-    addMsg({ role: 'agent', text: '', type: 'recommendation', recommendations })
-    setIsGenerating(false)
-  }, [isGenerating, requirements, messages, variants, currentVariant, tokenCount, agentStep, agentLabel, addMsg, updateVariant, pushUndoSnapshot])
-
-  /* ── Load URL ── */
-  const handleLoadUrl = useCallback((url: string, opts?: { priorMessages?: Message[] }) => {
-    const msgsBase = opts?.priorMessages ?? messages
-    pushUndoSnapshot({ variants, requirements, messages: msgsBase, currentVariant, tokenCount, agentStep, agentLabel })
-    const agentMsg: Message = { id: makeId(), role: 'agent', text: `🌐 Сайт загружен в вариант <strong>${currentVariant}</strong>: <code style="font-size:11px;background:rgba(99,102,241,.15);padding:1px 5px;border-radius:4px">${url}</code>`, type: 'normal', time: nowTime() }
-    const nextMessages = [...msgsBase, agentMsg]
-    const nextVariants = variants.map((v) => v.id === currentVariant ? { ...v, url, html: null, status: 'ready' as const } : v)
-    setVariants(nextVariants); setMessages(nextMessages)
-
-    const entryId = makeId()
-    setSiteVersions((prev) => [...prev, {
-      id: entryId, title: 'Импорт URL',
-      subtitle: url.replace(/^https?:\/\//, '').split('/')[0]?.slice(0, 40),
-      createdAt: Date.now(), status: 'autosave',
-      snapshot: cloneProjectSnapshot({ variants: nextVariants, requirements, messages: nextMessages, currentVariant, tokenCount, agentStep, agentLabel }),
-    }])
-    setActiveVersionId(entryId)
-  }, [currentVariant, variants, requirements, messages, tokenCount, agentStep, agentLabel, pushUndoSnapshot])
-
-  /* ── Questionnaire send ── */
-  const handleChatSend = useCallback((text: string) => {
-    const userMsg: Message = { id: makeId(), role: 'user', text: escHtml(text), type: 'normal', time: nowTime() }
-    setMessages((prev) => [...prev, userMsg])
-
-    // First message — start questionnaire
-    if (!qStarted.current) {
-      qStarted.current = true
-      const q = QUESTIONS[0]!
-      const hint = q.hint ? `<br/><span style="opacity:.6;font-size:11px">${q.hint}</span>` : ''
-      const opt  = q.optional ? ' <span style="opacity:.5;font-size:10px">(необязательно)</span>' : ''
-      setMessages((prev) => [...prev, {
-        id: makeId(), role: 'agent', time: nowTime(), type: 'normal',
-        text: `<strong>Вопрос 1 из ${QUESTIONS.length}${opt}</strong><br/>${q.text}${hint}`,
-      }])
-      setQStep(1)
-      return
-    }
-
-    // Questionnaire in progress
-    if (qStep > 0 && qStep <= QUESTIONS.length) {
-      const currentQ = QUESTIONS[qStep - 1]!
-      const newAnswers: QuestionnaireAnswers = { ...qAnswers, [currentQ.id]: text.trim() }
-      setQAnswers(newAnswers)
-
-      if (qStep === QUESTIONS.length) {
-        // Done — build JSON
-        const result = buildLanggraphInput(newAnswers)
-        setMessages((prev) => [...prev, {
-          id: makeId(), role: 'agent', time: nowTime(), type: 'json-result',
-          text: 'Опрос завершён! Вот JSON для LangGraph-агента:',
-          jsonData: result,
-        }])
-        setQStep(-1)
-        return
-      }
-
-      const nextStep = qStep + 1
-      const q   = QUESTIONS[nextStep - 1]!
-      const hint = q.hint ? `<br/><span style="opacity:.6;font-size:11px">${q.hint}</span>` : ''
-      const opt  = q.optional ? ' <span style="opacity:.5;font-size:10px">(необязательно)</span>' : ''
-      setMessages((prev) => [...prev, {
-        id: makeId(), role: 'agent', time: nowTime(), type: 'normal',
-        text: `<strong>Вопрос ${nextStep} из ${QUESTIONS.length}${opt}</strong><br/>${q.text}${hint}`,
-      }])
-      setQStep(nextStep)
-      return
-    }
-
-    // Questionnaire done — fallback to URL load or generate
-    const urlMatch = text.match(/https?:\/\/[^\s]+/)
-    if (urlMatch) {
-      const clean = urlMatch[0].replace(/[.,;]$/, '')
-      handleLoadUrl(clean, { priorMessages: [...messages, userMsg] })
-      return
-    }
-    handleGenerate(text)
-  }, [qStep, qAnswers, messages, handleGenerate, handleLoadUrl])
-
-  /* ── Requirements change ── */
-  const handleSlotDocumentChange = useCallback((slot: 'business' | 'guideline', doc: RequirementDocument) => {
-    pushUndoSnapshot({ variants, requirements, messages, currentVariant, tokenCount, agentStep, agentLabel })
-    setRequirements((prev) => ({ ...prev, [slot]: doc }))
-    if (doc.raw) {
-      const label = slot === 'business' ? 'Бизнес-требования' : 'Guideline'
-      addMsg({ role: 'system', text: `<strong>${label}</strong>: загружено <strong>${doc.fileName ?? 'текст'}</strong>`, type: 'system-context' })
-    }
-  }, [addMsg, pushUndoSnapshot, variants, requirements, messages, currentVariant, tokenCount, agentStep, agentLabel])
-
-  /* ── Fullscreen ── */
-  const currentVariantData = variants.find((v) => v.id === currentVariant)
-  const currentHtml = currentVariantData?.html ?? null
-  const currentUrl = currentVariantData?.url ?? null
-  const fullscreenPreset = (() => {
+  // ── Computed ──────────────────────────────────────────────────────────────
+  const currentVariantData  = variants.find((v) => v.id === currentVariant)
+  const currentHtml         = currentVariantData?.html ?? null
+  const currentUrl          = currentVariantData?.url ?? null
+  const fullscreenPreset    = (() => {
     const list = view === 'desktop' ? DESKTOP_RESOLUTIONS : MOBILE_RESOLUTIONS
-    const id = view === 'desktop' ? desktopResolutionId : mobileResolutionId
+    const id   = view === 'desktop' ? desktopResolutionId : mobileResolutionId
     return getResolutionById(id, list) ?? list[0]!
   })()
 
   return (
     <div className="h-full flex flex-col" style={{ background: 'var(--color-bg)' }}>
       <TopBar
-        projectName={projectName} view={view} tokenCount={tokenCount}
+        projectName={projectName} view={view}
         canUndo={undoPast.length > 0 && !isGenerating}
         canRedo={undoFuture.length > 0 && !isGenerating}
         onViewChange={setView} onProjectRename={setProjectName}
@@ -359,12 +398,7 @@ export default function App() {
       />
 
       <div className="flex-1 flex overflow-hidden min-h-0">
-        <IconRail
-          activeDrawer={activeDrawer}
-          requirements={requirements}
-          agentStep={agentStep}
-          onToggle={setActiveDrawer}
-        />
+        <IconRail activeDrawer={activeDrawer} requirements={requirements} agentStep={agentStep} onToggle={setActiveDrawer} />
 
         <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden relative">
           <CenterPreview
@@ -376,33 +410,52 @@ export default function App() {
             onSelectVariant={setCurrentVariant}
             onExpandFullscreen={() => setFullscreen(true)}
           />
-          <VersionTimeline
-            versions={siteVersions} activeId={activeVersionId}
-            disabled={isGenerating} onSelect={restoreSiteVersion}
-          />
+          <VersionTimeline versions={siteVersions} activeId={activeVersionId} disabled={isGenerating} onSelect={restoreSiteVersion} />
 
-          {/* Drawers overlay inside center */}
           <ChatDrawer
-            open={activeDrawer === 'chat'} messages={messages}
-            onClose={() => setActiveDrawer(null)} onSend={handleChatSend}
-            onFileUpload={() => addMsg({ role: 'system', text: 'Загрузка макетов через чат пока в разработке — используйте панель «Документы» слева.', type: 'system-context' })}
+            open={activeDrawer === 'chat'}
+            messages={messages}
+            quickReplies={getQuickReplies(chatPhase)}
+            voiceState={voiceState}
+            voiceElapsed={voiceElapsed}
+            voiceError={voiceError}
+            prefillText={prefillText}
+            prefillKey={prefillKey}
+            canSubmitEmpty={chatPhase === 'edit_business' || chatPhase === 'edit_guideline' || chatPhase === 'edit_wishes'}
+            sectionFiles={(() => {
+              const field =
+                chatPhase === 'business_collect' || chatPhase === 'edit_business' ? docCollection.business :
+                chatPhase === 'guideline_collect' || chatPhase === 'edit_guideline' ? docCollection.guideline :
+                chatPhase === 'wishes_collect' || chatPhase === 'edit_wishes' ? docCollection.wishes : null
+              return field?.files ?? []
+            })()}
+            onRemoveSectionFile={(idx) => {
+              const field =
+                chatPhase === 'business_collect' || chatPhase === 'edit_business' ? 'business' :
+                chatPhase === 'guideline_collect' || chatPhase === 'edit_guideline' ? 'guideline' :
+                chatPhase === 'wishes_collect' || chatPhase === 'edit_wishes' ? 'wishes' : null
+              if (!field) return
+              setDocCollection((prev) => ({
+                ...prev,
+                [field]: { ...prev[field], files: prev[field].files.filter((_, i) => i !== idx) },
+              }))
+            }}
+            onClose={() => setActiveDrawer(null)}
+            onSubmit={handleSubmit}
+            onVoiceStart={startRecording}
+            onVoiceStop={stopRecording}
+            onVoiceCancel={cancelRecording}
           />
           <DocsDrawer
             open={activeDrawer === 'docs'}
             business={requirements.business} guideline={requirements.guideline}
             onClose={() => setActiveDrawer(null)} onSlotChange={handleSlotDocumentChange}
           />
-          <AgentDrawer
-            open={activeDrawer === 'agent'} agentStep={agentStep} agentLabel={agentLabel}
-            onClose={() => setActiveDrawer(null)}
-          />
+          <AgentDrawer open={activeDrawer === 'agent'} agentStep={agentStep} agentLabel={agentLabel} onClose={() => setActiveDrawer(null)} />
         </div>
       </div>
 
-      <StatusBar
-        requirements={requirements} agentStep={agentStep} agentLabel={agentLabel}
-        onOpenDrawer={setActiveDrawer}
-      />
+      <StatusBar requirements={requirements} agentStep={agentStep} agentLabel={agentLabel} onOpenDrawer={setActiveDrawer} />
 
       <FullscreenOverlay
         open={fullscreen} html={currentHtml} url={currentUrl}
@@ -411,14 +464,12 @@ export default function App() {
         onClose={() => setFullscreen(false)}
       />
 
-      <OnboardingTour open={tourOpen} onDismiss={dismissTour} onComplete={completeTour} />
+      <OnboardingTour open={tourOpen} onDismiss={() => { try { localStorage.setItem(ONBOARDING_STORAGE_KEY, 'dismissed') } catch {/**/ } setTourOpen(false) }} onComplete={() => { try { localStorage.setItem(ONBOARDING_STORAGE_KEY, 'completed') } catch {/**/ } setTourOpen(false) }} />
     </div>
   )
 }
 
-function escHtml(s: string) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-}
+// Helpers ────────────────────────────────────────────────────────────────────
 
 function mergeDocumentsForCompliance(business: RequirementDocument, guideline: RequirementDocument): BTSummary | null {
   if (!business.summary && !guideline.summary) return null
@@ -429,10 +480,4 @@ function mergeDocumentsForCompliance(business: RequirementDocument, guideline: R
   }
 }
 
-function buildCompliance(summary: BTSummary): ComplianceItem[] {
-  return [
-    ...summary.goals.slice(0, 2).map((g) => ({ label: g.slice(0, 55), status: 'ok' as const })),
-    ...summary.constraints.slice(0, 2).map((c) => ({ label: c.slice(0, 55), status: 'question' as const })),
-    { label: 'Доступность (WCAG AA)', status: 'question' as const },
-  ]
-}
+void mergeDocumentsForCompliance

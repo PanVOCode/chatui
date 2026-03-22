@@ -4,7 +4,6 @@ import type { ViewMode } from '../types'
 interface Props {
   projectName: string
   view: ViewMode
-  tokenCount: number
   canUndo: boolean
   canRedo: boolean
   onViewChange: (v: ViewMode) => void
@@ -14,17 +13,8 @@ interface Props {
   onOpenTour: () => void
 }
 
-const COLLABORATORS = [
-  { initials: 'АМ', color: '#6366f1' },
-  { initials: 'МК', color: '#10b981' },
-]
-
-function formatTokens(n: number) {
-  return n >= 1000 ? `${(n / 1000).toFixed(1).replace('.0', '')}k` : String(n)
-}
-
 export default function TopBar({
-  projectName, view, tokenCount, canUndo, canRedo,
+  projectName, view, canUndo, canRedo,
   onViewChange, onProjectRename, onUndo, onRedo, onOpenTour,
 }: Props) {
   const [editing, setEditing] = useState(false)
@@ -92,33 +82,7 @@ export default function TopBar({
         <ViewBtn active={view === 'phone'}   onClick={() => onViewChange('phone')}   label="Phone"   />
       </div>
 
-      <div
-        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md"
-        style={{ background: 'var(--color-s1)', border: '1px solid var(--color-border)' }}
-        title="Использовано токенов"
-      >
-        <span style={{ color: 'var(--color-muted)', fontSize: 10 }}>⬡</span>
-        <span className="text-[11px] font-semibold" style={{ color: 'var(--color-accent)', fontFamily: 'var(--font-mono)' }}>
-          {formatTokens(tokenCount)}
-        </span>
-      </div>
-
       <TbBtn icon={<HelpIcon />} label="Открыть тур" onClick={onOpenTour} />
-
-      <div className="flex items-center" role="group" aria-label="Участники">
-        {COLLABORATORS.map((c, i) => (
-          <div
-            key={i}
-            title={c.initials}
-            className="flex items-center justify-center rounded-full text-white font-semibold"
-            style={{
-              width: 24, height: 24, background: c.color, border: '2px solid var(--color-s0)',
-              fontSize: 8, fontFamily: 'var(--font-display)',
-              marginLeft: i === 0 ? 0 : -6, zIndex: COLLABORATORS.length - i, position: 'relative',
-            }}
-          >{c.initials}</div>
-        ))}
-      </div>
     </header>
   )
 }

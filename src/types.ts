@@ -1,4 +1,31 @@
 export type ViewMode = 'desktop' | 'phone'
+
+export type ChatPhase =
+  | 'greet'
+  | 'business_collect'
+  | 'guideline_collect'
+  | 'wishes_collect'
+  | 'review'
+  | 'edit_business'
+  | 'edit_guideline'
+  | 'edit_wishes'
+  | 'done'
+
+export interface DocFile {
+  url: string
+  fileName: string
+}
+
+export interface DocEntry {
+  text: string
+  files: DocFile[]
+}
+
+export interface DocCollection {
+  business: DocEntry
+  guideline: DocEntry
+  wishes: DocEntry
+}
 export type VariantId = 'A' | 'B' | 'C'
 export type AgentStep = 0 | 1 | 2 | 3 | 4
 export type DrawerKind = 'chat' | 'docs' | 'agent' | null

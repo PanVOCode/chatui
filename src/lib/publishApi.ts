@@ -1,4 +1,5 @@
 const BASE = 'https://media.progressusbot.ru'
+const API_KEY = import.meta.env.VITE_PUBLISH_API_KEY as string | undefined
 
 export interface ConvertResult {
   text: string
@@ -13,7 +14,11 @@ export interface ImageUploadResult {
 export async function convertDocument(file: File): Promise<ConvertResult> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(`${BASE}/api/publish/convert`, { method: 'POST', body: form })
+  const res = await fetch(`${BASE}/api/publish/convert`, {
+    method: 'POST',
+    headers: API_KEY ? { 'X-API-Key': API_KEY } : {},
+    body: form,
+  })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body?.error?.message ?? `Ошибка конвертации: ${res.status}`)
@@ -29,7 +34,11 @@ export async function convertDocument(file: File): Promise<ConvertResult> {
 export async function uploadImage(file: File): Promise<ImageUploadResult> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(`${BASE}/api/publish/image`, { method: 'POST', body: form })
+  const res = await fetch(`${BASE}/api/publish/image`, {
+    method: 'POST',
+    headers: API_KEY ? { 'X-API-Key': API_KEY } : {},
+    body: form,
+  })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body?.error?.message ?? `Ошибка загрузки: ${res.status}`)
