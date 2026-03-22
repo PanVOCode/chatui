@@ -32,6 +32,7 @@ import {
 } from './lib/chatPhaseTransitions'
 import { recognizeSpeech } from './lib/speechKitApi'
 import { isImageFile, parsePdf } from './lib/publishApi'
+import { generateSite } from './lib/generateApi'
 import { useVoiceRecorder } from './hooks/useVoiceRecorder'
 import { useFileUpload } from './hooks/useFileUpload'
 import type {
@@ -241,7 +242,7 @@ export default function App() {
             })
             return 'edit_wishes'
           }
-          // "Готово"
+          // "Готово" — запуск генерации
           setDocCollection((docs) => {
             const toOutput = (entry: DocEntry) => {
               const docTexts = entry.files
@@ -256,10 +257,29 @@ export default function App() {
               guideline: toOutput(docs.guideline),
               wishes: toOutput(docs.wishes),
             }
-            console.log('[chatui] docCollection:', JSON.stringify(output, null, 2))
+            setTimeout(() => {
+              addMsg({ role: 'agent', text: getPhasePrompt('done'), type: 'normal' })
+              addMsg({ role: 'agent', text: '⏳ Генерирую прототип, это займёт несколько минут…', type: 'system-context' })
+              generateSite(output).then((result) => {
+                if (result.deploy_url) {
+                  setVariants((prev) => prev.map((v) =>
+                    v.id === 'A' ? { ...v, url: result.deploy_url!, status: 'ready' } : v
+                  ))
+                  addMsg({
+                    role: 'agent',
+                    type: 'normal',
+                    text: `✅ Готово! Сайт задеплоен: <a href="${result.deploy_url}" target="_blank" style="color:var(--color-accent)">${result.deploy_url}</a>`,
+                  })
+                } else {
+                  addMsg({ role: 'agent', type: 'normal', text: '✅ Генерация завершена. URL деплоя не получен — проверь агента.' })
+                }
+              }).catch((e: unknown) => {
+                const msg = e instanceof Error ? e.message : String(e)
+                addMsg({ role: 'agent', type: 'normal', text: `❌ Ошибка генерации: ${esc(msg)}` })
+              })
+            }, 100)
             return docs
           })
-          setTimeout(() => addMsg({ role: 'agent', text: getPhasePrompt('done'), type: 'normal' }), 100)
           return 'done'
         }
 

@@ -91,7 +91,7 @@ export const QUESTIONS: QuestionDef[] = [
   { id: 'site_url',            text: 'URL где будет размещён сайт?', placeholder: 'https://automatoria.ru/company-site/', optional: true },
 ]
 
-export type QuestionnaireAnswers = Partial<Record<QuestionId, string>>
+export type QuestionnaireAnswers = Partial<Record<QuestionId, string>> & { _docs?: { business: string; guideline: string; wishes: string } }
 
 export function buildLanggraphInput(answers: QuestionnaireAnswers): LanggraphInput {
   const brandName  = answers.brand_name ?? ''
@@ -134,7 +134,7 @@ export function buildLanggraphInput(answers: QuestionnaireAnswers): LanggraphInp
           form:        true,
           form_link:   '#support',
         },
-        business_requirements_ref: '',
+        business_requirements_ref: answers._docs?.business ? '(загружено через чат)' : '',
       },
       design: {
         style:          answers.design_style        ?? '',
